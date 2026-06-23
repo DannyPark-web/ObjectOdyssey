@@ -1,0 +1,159 @@
+# from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, UploadFile
+
+from odyssey_vision import process_object_odyssey, target_keywords
+
+app = FastAPI(title="Object Odyssey Vision API")
+
+
+@app.post("/extract")
+async def extract_object(file: UploadFile = File(...)) -> dict[str, str]:
+    contents = await file.read()
+    nparray = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparray, cv2.IMREAD_COLOR)
+
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image file.")
+
+    result = process_object_odyssey(img, target_keywords)
+    if result["status"] == "error":
+        return {"status": "fail", "message": result["message"]}
+
+    return {
+        "status": "success",
+        "target": result["target"],
+        "output_path": result["output_path"],
+    }
+
+
+ROOT_DIR = Path(__file__).resolve().parent
+JHPARK_DIR = ROOT_DIR / "JHPark"
+if str(JHPARK_DIR) not in sys.path:
+    sys.path.insert(0, str(JHPARK_DIR))
+
+load_dotenv(JHPARK_DIR / ".env")
+
+from app.pipeline import build_character_sheet, build_style_prompts, generate_images, generate_story
+from app.utils import list_reference_images, resolve_reference_image_path
+
+
+def get_reference_images() -> list[str]:
+    return list_reference_images()
+
+
+def resolve_reference_image(reference_image: str) -> str:
+    return str(resolve_reference_image_path(reference_image))
+
+
+def create_character_art(
+    vision_result: dict,
+    parent_input: dict,
+    reference_image: str,
+    prompt_options: dict | None = None,
+) -> dict:
+    character_sheet = build_character_sheet(vision_result, parent_input)
+    style_prompts = build_style_prompts(character_sheet, prompt_options)
+    generated_images = generate_images(style_prompts, reference_image)
+    return {
+        "character_sheet": character_sheet,
+        "style_prompts": style_prompts,
+        "generated_images": generated_images,
+    }
+
+
+@app.get("/reference-images")
+def reference_images() -> dict[str, list[str]]:
+    images = get_reference_images()
+    if not images:
+        raise HTTPException(status_code=404, detail="No usable images were found in the root nukki folder.")
+    return {"reference_images": images}
+
+
+@app.post("/create-art")
+async def create_art(payload: dict) -> dict:
+    vision_result = payload.get("vision_result", {})
+    parent_input = payload.get("parent_input", {})
+    reference_image = payload.get("reference_image")
+    prompt_options = payload.get("prompt_options")
+
+    if not reference_image:
+        raise HTTPException(status_code=400, detail="reference_image is required.")
+
+    try:
+        result = create_character_art(vision_result, parent_input, reference_image, prompt_options)
+        return {"status": "success", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/pipeline")
+async def pipeline(payload: dict) -> dict:
+    vision_result = payload.get("vision_result", {})
+    parent_input = payload.get("parent_input", {})
+    reference_image = payload.get("reference_image")
+    prompt_options = payload.get("prompt_options")
+
+    if not reference_image:
+        raise HTTPException(status_code=400, detail="reference_image is required.")
+
+    try:
+        character_sheet = build_character_sheet(vision_result, parent_input)
+        style_prompts = build_style_prompts(character_sheet, prompt_options)
+        generated_images = generate_images(style_prompts, reference_image)
+
+        story_reference_image = generated_images.get("active_style")
+        if character_sheet.get("tone") != "모험적인":
+            story_reference_image = generated_images.get("soft_style") or story_reference_image
+
+        story = None
+        story_error = None
+        try:
+            story = generate_story(
+                character_sheet,
+                style_prompts=style_prompts,
+                reference_image=story_reference_image,
+            )
+        except Exception as exc:
+            story_error = str(exc)
+
+        return {
+            "status": "success",
+            "character_sheet": character_sheet,
+            "style_prompts": style_prompts,
+            "generated_images": generated_images,
+            "story": story,
+            "story_error": story_error,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/generate-story")
+async def create_story(payload: dict) -> dict:
+    character_sheet = payload.get("character_sheet")
+    extra_prompt = str(payload.get("extra_prompt") or "")
+    story_tone = payload.get("story_tone")
+    style_prompts = payload.get("style_prompts")
+    reference_image = payload.get("reference_image")
+
+    if not isinstance(character_sheet, dict):
+        raise HTTPException(status_code=400, detail="character_sheet is required.")
+
+    try:
+        result = generate_story(
+            character_sheet,
+            extra_prompt=extra_prompt,
+            story_tone=story_tone,
+            style_prompts=style_prompts,
+            reference_image=reference_image,
+        )
+        return {"status": "success", **result}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

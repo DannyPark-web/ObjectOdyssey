@@ -1,0 +1,11 @@
+models/*.pt
+models/*.pth
+models/*.ckpt
+models/*.safetensors
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+outputs/
+generated/
